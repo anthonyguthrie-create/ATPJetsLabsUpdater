@@ -1,5 +1,5 @@
 # =============================================================================
-# Deploy-GarminData-GDrive.ps1 (Deep Freeze Cloud / SYSTEM Context)
+# Deploy-GarminData-Release.ps1 (Deep Freeze Cloud / SYSTEM Context)
 # =============================================================================
 $ErrorActionPreference = "Stop"
 $ProgressPreference    = "SilentlyContinue"
@@ -18,9 +18,11 @@ function Write-Log {
 # Configuration
 # -----------------------------------------------------------------------------
 $DestinationFolder = "C:\X-Plane 12\Custom Data"
-$FileId            = "1hObAdYNqVTPnmggl4djK3pdskmz3o5hr"
 
-# Targeted files and directories to extract and copy
+# Default fallback GitHub Release URL
+$DownloadUrl       = "https://github.com/anthonyguthrie-create/ATPJetsLabsUpdater/releases/download/v1.0/NAVDB.zip"
+
+# Target files/folders to extract and deploy
 $TargetItems = @(
     "CIFP",
     "earth_fix.dat",
@@ -31,16 +33,20 @@ $TargetItems = @(
     "earth_msa.dat"
 )
 
-# Parse parameters passed via Deep Freeze Cloud
+# Parse argument passed via Deep Freeze Cloud
 if ($args.Count -gt 0) {
     $rawArgs = $args -join " "
-    if ($rawArgs -match 'id=([a-zA-Z0-9_-]+)') {
-        $FileId = $matches[1]
+    if ($rawArgs -match '(https?://[^\s"]+)') {
+        $DownloadUrl = $matches[1]
     }
 }
 
-Write-Log "Starting deployment to: $DestinationFolder"
-Write-Log "Target Google Drive File ID: $FileId"
+# Clean HTML-encoded characters
+Add-Type -AssemblyName System.Web
+$DownloadUrl = [System.Web.HttpUtility]::HtmlDecode($DownloadUrl)
+
+Write-Log "Starting deployment (GitHub Release) to: $DestinationFolder"
+Write-Log "Target Download URL: $DownloadUrl"
 
 # -----------------------------------------------------------------------------
 # 1. Directory Check
@@ -50,72 +56,46 @@ if (-not (Test-Path -LiteralPath $DestinationFolder)) {
     New-Item -Path $DestinationFolder -ItemType Directory -Force | Out-Null
 }
 
-$tempZip     = Join-Path $env:TEMP ("gdrive_" + [Guid]::NewGuid().ToString("N") + ".zip")
-$tempCookie  = Join-Path $env:TEMP ("cookie_" + [Guid]::NewGuid().ToString("N") + ".txt")
+$tempZip     = Join-Path $env:TEMP ("ghrel_" + [Guid]::NewGuid().ToString("N") + ".zip")
 $tempExtract = Join-Path $env:TEMP ("extract_" + [Guid]::NewGuid().ToString("N"))
 
 # -----------------------------------------------------------------------------
-# 2. Download from Google Drive (API Direct Stream & Token Bypass)
+# 2. Download via Native curl.exe (Redirect & CDN Stream Safe)
 # -----------------------------------------------------------------------------
 try {
-    Write-Log "Downloading ZIP package from Google Drive..."
+    Write-Log "Downloading ZIP package from GitHub Release..."
     
-    # Download attempt via direct export URL
-    $baseUrl = "https://drive.google.com/uc?export=download&id=$FileId"
-    
-    # Save response and cookies using curl
-    & curl.exe -s -L -c "$tempCookie" "$baseUrl" -o "$tempZip"
+    # -L follows GitHub CDN redirects, -s suppresses noise, -k ensures TLS stream success
+    & curl.exe -s -L -k -o "$tempZip" "$DownloadUrl"
 
-    # Inspect downloaded payload header to see if it's an HTML virus scan page
-    $firstBytes = [System.IO.File]::ReadAllText($tempZip)
-    if ($firstBytes -match '<!DOCTYPE html' -or $firstBytes -match '<html') {
-        Write-Log "Virus scan warning page detected. Extracting confirmation token..."
-        
-        # Regex search for all current variants of Google Drive confirm tokens
-        $confirmToken = ""
-        if ($firstBytes -match 'confirm=([0-9A-Za-z_\-]+)') {
-            $confirmToken = $matches[1]
-        } elseif ($firstBytes -match 'name="confirm" value="([0-9A-Za-z_\-]+)"') {
-            $confirmToken = $matches[1]
-        } elseif ($firstBytes -match 'uuid=([0-9A-Za-z_\-]+)') {
-            $confirmToken = $matches[1]
-        }
-
-        if ($confirmToken) {
-            Write-Log "Confirm token retrieved ($confirmToken). Re-requesting direct file stream..."
-            $confirmUrl = "https://drive.google.com/uc?export=download&confirm=$confirmToken&id=$FileId"
-            & curl.exe -s -L -b "$tempCookie" "$confirmUrl" -o "$tempZip"
-        } else {
-            # Fallback: Direct API Endpoint bypass
-            Write-Log "Attempting Direct Google Drive API bypass stream..."
-            $apiUrl = "https://www.googleapis.com/drive/v3/files/${FileId}?alt=media"
-            & curl.exe -s -L "$apiUrl" -o "$tempZip"
-        }
+    if (-not (Test-Path $tempZip)) {
+        throw "Target zip file missing from disk after download."
     }
 
-    # Verify that the downloaded file is a valid ZIP archive (Magic Header: PK..)
+    $fileSize = (Get-Item $tempZip).Length
+    
+    # Validate ZIP Magic Header (PK..) to ensure we didn't receive a 404 text response
     $bytes = Get-Content -Path $tempZip -Encoding Byte -TotalCount 2 -ErrorAction SilentlyContinue
     if (-not ($bytes[0] -eq 0x50 -and $bytes[1] -eq 0x4B)) {
-        throw "Downloaded payload is not a valid ZIP file. Ensure Google Drive permissions are set to 'Anyone with the link'."
+        throw "Downloaded payload is NOT a valid ZIP file ($fileSize bytes). Verify the Release URL and ensure repository is PUBLIC."
     }
 
-    $finalSize = (Get-Item $tempZip).Length
-    Write-Log "Download stream finished successfully. ZIP Size: $finalSize bytes."
-
+    Write-Log "Download completed successfully. ZIP Size: $fileSize bytes."
 } catch {
-    Write-Log "ERROR: Google Drive download failed. Details: $_"
-    Remove-Item -Path $tempZip, $tempCookie -Force -ErrorAction SilentlyContinue
+    Write-Log "ERROR: Download failed. Details: $_"
+    Remove-Item -Path $tempZip -Force -ErrorAction SilentlyContinue
     exit 1
 }
 
 # -----------------------------------------------------------------------------
-# 3. Extract Archive & Copy Selected Items
+# 3. Extract Archive & Deploy Items
 # -----------------------------------------------------------------------------
 try {
     Write-Log "Extracting ZIP contents..."
     Expand-Archive -Path $tempZip -DestinationPath $tempExtract -Force
 
     foreach ($itemName in $TargetItems) {
+        # Recurse extraction folder to find target items anywhere in the package
         $foundItems = Get-ChildItem -Path $tempExtract -Filter $itemName -Recurse -ErrorAction SilentlyContinue
 
         if ($foundItems) {
@@ -137,9 +117,9 @@ try {
     Write-Log "Deployment completed successfully!"
     exit 0
 } catch {
-    Write-Log "ERROR: Extraction or file deployment failed. $_"
+    Write-Log "ERROR: Extraction or deployment failed. $_"
     exit 3
 } finally {
-    Remove-Item -Path $tempZip, $tempCookie -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path $tempZip -Force -ErrorAction SilentlyContinue
     Remove-Item -Path $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
 }
