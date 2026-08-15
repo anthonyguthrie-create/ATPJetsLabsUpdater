@@ -1,12 +1,12 @@
 # =============================================================================
-# Deploy-GarminData-v2.ps1 (Deep Freeze Cloud / SYSTEM Context Optimized)
+# Deploy-GarminData-GDrive.ps1 (Deep Freeze Cloud / SYSTEM Context)
 # =============================================================================
 $ErrorActionPreference = "Stop"
 $ProgressPreference    = "SilentlyContinue"
 
-# Force TLS 1.2 / TLS 1.3
+# Force TLS 1.2
 try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 } catch { }
 
 function Write-Log {
@@ -18,8 +18,10 @@ function Write-Log {
 # Configuration
 # -----------------------------------------------------------------------------
 $DestinationFolder = "C:\X-Plane 12\Custom Data"
-$DownloadUrl       = "https://raw.githubusercontent.com/anthonyguthrie-create/ATPJetsLabsUpdater/main/NAVDB.zip"
+$DefaultFileId     = "1CHt_W9PP_nhhO1YbPV8fjGno39C-V5Hh"
+$FileId            = $DefaultFileId
 
+# Targeted files and directories to extract and copy
 $TargetItems = @(
     "CIFP",
     "earth_fix.dat",
@@ -30,59 +32,62 @@ $TargetItems = @(
     "earth_msa.dat"
 )
 
-# Parse argument list passed via Deep Freeze Cloud
+# Parse parameters passed via Deep Freeze Cloud
 if ($args.Count -gt 0) {
     $rawArgs = $args -join " "
-    if ($rawArgs -match '(https?://[^\s"]+)') {
-        $DownloadUrl = $matches[1]
+    if ($rawArgs -match 'id=([a-zA-Z0-9_-]+)') {
+        $FileId = $matches[1]
     }
 }
 
-# Clean HTML-encoded characters
-Add-Type -AssemblyName System.Web
-$DownloadUrl = [System.Web.HttpUtility]::HtmlDecode($DownloadUrl)
-
-Write-Log "Starting deployment (v2 engine) to: $DestinationFolder"
-Write-Log "Target Download URL: $DownloadUrl"
+Write-Log "Starting deployment to: $DestinationFolder"
+Write-Log "Target Google Drive File ID: $FileId"
 
 # -----------------------------------------------------------------------------
 # 1. Directory Check
 # -----------------------------------------------------------------------------
-try {
-    if (-not (Test-Path -LiteralPath $DestinationFolder)) {
-        Write-Log "Creating destination directory: $DestinationFolder"
-        New-Item -Path $DestinationFolder -ItemType Directory -Force | Out-Null
-    }
-} catch {
-    Write-Log "ERROR: Failed to create target directory. $_"
-    exit 2
+if (-not (Test-Path -LiteralPath $DestinationFolder)) {
+    Write-Log "Creating destination directory: $DestinationFolder"
+    New-Item -Path $DestinationFolder -ItemType Directory -Force | Out-Null
 }
 
-$tempZip     = Join-Path $env:TEMP ("gh_" + [Guid]::NewGuid().ToString("N") + ".zip")
+$tempZip     = Join-Path $env:TEMP ("gdrive_" + [Guid]::NewGuid().ToString("N") + ".zip")
+$tempCookie  = Join-Path $env:TEMP ("cookie_" + [Guid]::NewGuid().ToString("N") + ".txt")
 $tempExtract = Join-Path $env:TEMP ("extract_" + [Guid]::NewGuid().ToString("N"))
 
 # -----------------------------------------------------------------------------
-# 2. BITS Transfer (Native Windows SYSTEM Downloader)
+# 2. Download from Google Drive (Handles Confirm Tokens & Large Files)
 # -----------------------------------------------------------------------------
 try {
-    Write-Log "Executing BITS transfer engine..."
+    Write-Log "Downloading ZIP package from Google Drive..."
     
-    Import-Module BitsTransfer -ErrorAction SilentlyContinue
-    Start-BitsTransfer -Source $DownloadUrl -Destination $tempZip -Priority Foreground
+    $baseUrl = "https://drive.google.com/uc?export=download&id=$FileId"
+    
+    # Pass 1: Get initial response and save cookies
+    & curl.exe -s -L -c "$tempCookie" "$baseUrl" -o "$tempZip"
 
-    if (-not (Test-Path $tempZip)) {
-        throw "Download file was not created on disk."
+    # Check if Google returned an HTML virus scan confirmation page
+    $fileInfo = Get-Item $tempZip
+    if ($fileInfo.Length -lt 100000) {
+        $content = [System.IO.File]::ReadAllText($tempZip)
+        if ($content -match 'confirm=([0-9A-Za-z_\-]+)' -or $content -match 'name="confirm" value="([0-9A-Za-z_\-]+)"') {
+            $confirmToken = $matches[1]
+            Write-Log "Confirm token detected ($confirmToken). Executing second pass download..."
+            
+            $confirmUrl = "https://drive.google.com/uc?export=download&confirm=$confirmToken&id=$FileId"
+            & curl.exe -s -L -b "$tempCookie" "$confirmUrl" -o "$tempZip"
+        }
     }
 
-    $fileSize = (Get-Item $tempZip).Length
-    Write-Log "Download stream finished. File Size: $fileSize bytes."
-    
-    if ($fileSize -lt 1000) {
-        throw "Downloaded file payload is invalid or empty ($fileSize bytes)."
+    $finalSize = (Get-Item $tempZip).Length
+    Write-Log "Download stream completed. Size: $finalSize bytes."
+
+    if ($finalSize -lt 1000) {
+        throw "Downloaded file is empty or invalid ($finalSize bytes). Ensure Google Drive file has 'Anyone with link' permissions."
     }
 } catch {
-    Write-Log "ERROR: Transfer failed. Details: $_"
-    Remove-Item -Path $tempZip -Force -ErrorAction SilentlyContinue
+    Write-Log "ERROR: Google Drive download failed. Details: $_"
+    Remove-Item -Path $tempZip, $tempCookie -Force -ErrorAction SilentlyContinue
     exit 1
 }
 
@@ -108,16 +113,16 @@ try {
                 }
             }
         } else {
-            Write-Log "WARNING: Expected item '$itemName' was not found in the ZIP package."
+            Write-Log "WARNING: Item '$itemName' was not found in the ZIP package."
         }
     }
 
     Write-Log "Deployment completed successfully!"
     exit 0
 } catch {
-    Write-Log "ERROR: Extraction or deployment failed. $_"
+    Write-Log "ERROR: Extraction or file deployment failed. $_"
     exit 3
 } finally {
-    Remove-Item -Path $tempZip -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path $tempZip, $tempCookie -Force -ErrorAction SilentlyContinue
     Remove-Item -Path $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
 }
