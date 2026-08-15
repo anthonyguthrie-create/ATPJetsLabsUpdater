@@ -7,7 +7,7 @@ $ProgressPreference    = "SilentlyContinue"
 # Force TLS 1.2
 try {
     [Net.ServicePointManager]::SecurityProtocol = `
-        [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+        [Net.SecurityProtocolType]::Tls12
 } catch { }
 
 function Write-Log {
@@ -16,13 +16,12 @@ function Write-Log {
 }
 
 # -----------------------------------------------------------------------------
-# Configuration
+# Configuration (Supports Command Line Arguments & Defaults)
 # -----------------------------------------------------------------------------
 $DestinationFolder = "C:\X-Plane 12\Custom Data"
-$DefaultFileId     = "1CHt_W9PP_nhhO1YbPV8fjGno39C-V5Hh"
-$FileId            = $DefaultFileId
+$FileId            = "1CHt_W9PP_nhhO1YbPV8fjGno39C-V5Hh" # Default target File ID
 
-# Targeted files and directories to copy
+# Targeted files and directories to extract and copy
 $TargetItems = @(
     "CIFP",
     "earth_fix.dat",
@@ -33,10 +32,10 @@ $TargetItems = @(
     "earth_msa.dat"
 )
 
-# Parse parameters passed via Deep Freeze Cloud
+# Check if -DownloadUrl was passed in $args
 for ($i = 0; $i -lt $args.Count; $i++) {
     if ($args[$i] -eq "-DownloadUrl" -and ($i + 1) -lt $args.Count) {
-        $passedUrl = [System.Web.HttpUtility]::HtmlDecode($args[$i + 1])
+        $passedUrl = $args[$i + 1]
         if ($passedUrl -match 'id=([a-zA-Z0-9_-]+)') {
             $FileId = $matches[1]
         }
@@ -44,7 +43,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
 }
 
 Write-Log "Starting deployment to: $DestinationFolder"
-Write-Log "Target Google Drive File ID: $FileId"
+Write-Log "Target File ID         : $FileId"
 
 # -----------------------------------------------------------------------------
 # 1. Ensure Target Directory Exists
@@ -59,52 +58,46 @@ try {
     exit 2
 }
 
-# Setup temporary paths
+# -----------------------------------------------------------------------------
+# 2. Download from Google Drive (Handles SYSTEM context & Confirm Tokens)
+# -----------------------------------------------------------------------------
 $tempZip     = Join-Path $env:TEMP ("gdrive_" + [Guid]::NewGuid().ToString("N") + ".zip")
 $tempExtract = Join-Path $env:TEMP ("extract_" + [Guid]::NewGuid().ToString("N"))
 
-# -----------------------------------------------------------------------------
-# 2. Download ZIP from Google Drive (Cookie-Aware Session)
-# -----------------------------------------------------------------------------
 try {
-    Write-Log "Downloading ZIP file from Google Drive..."
-
+    Write-Log "Downloading from Google Drive..."
+    
     $baseUrl = "https://drive.google.com/uc?export=download&id=$FileId"
-    $userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-
-    # First Request to retrieve initial response and session cookies
-    $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-    $response = Invoke-WebRequest -Uri $baseUrl -SessionVariable 'session' -UserAgent $userAgent -UseBasicParsing
-
-    # Check for virus scan confirmation token/form
-    if ($response.Content -match 'confirm=([0-9A-Za-z_\-]+)' -or $response.Forms) {
-        $confirmToken = $matches[1]
+    $wc = New-Object System.Net.WebClient
+    $wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+    
+    # First attempt
+    $wc.DownloadFile($baseUrl, $tempZip)
+    
+    # Check if we received HTML instead of the file (Google's virus warning page)
+    $fileInfo = Get-Item $tempZip
+    if ($fileInfo.Length -lt 100000) {
+        $content = [System.IO.File]::ReadAllText($tempZip)
         
-        if (-not $confirmToken -and $response.Forms[0].Action -match 'confirm=([0-9A-Za-z_\-]+)') {
+        # Updated regex to capture token from modern Google Drive warning pages or buttons
+        if ($content -match 'confirm=([0-9A-Za-z_\-]+)' -or $content -match 'name="confirm" value="([0-9A-Za-z_\-]+)"') {
             $confirmToken = $matches[1]
-        }
-
-        if ($confirmToken) {
-            Write-Log "Bypassing Google warning with confirmation token: $confirmToken"
-            $confirmUrl = "https://drive.google.com/uc?export=download&confirm=$confirmToken&id=$FileId"
-            Invoke-WebRequest -Uri $confirmUrl -OutFile $tempZip -WebSession $session -UserAgent $userAgent -UseBasicParsing
+            Write-Log "Confirm token found ($confirmToken). Re-requesting direct file stream..."
+            $confirmUrl = "$baseUrl&confirm=$confirmToken"
+            $wc.DownloadFile($confirmUrl, $tempZip)
         } else {
-            # Direct save if no confirmation parameter was required
-            [System.IO.File]::WriteAllBytes($tempZip, $response.Content)
+            # Secondary fallback for large drive downloads
+            $confirmUrl = "$baseUrl&confirm=t"
+            Write-Log "Attempting forced confirmation download..."
+            $wc.DownloadFile($confirmUrl, $tempZip)
         }
-    } else {
-        # File is small enough to download directly on first pass
-        [System.IO.File]::WriteAllBytes($tempZip, $response.Content)
     }
 
-    $finalSize = (Get-Item $tempZip).Length
-    if ($finalSize -lt 1000) {
-        $errContent = [System.IO.File]::ReadAllText($tempZip)
-        if ($errContent.Length -gt 200) { $errContent = $errContent.Substring(0, 200) }
-        throw "Downloaded file is invalid ($finalSize bytes). Content: $errContent"
+    if ((Get-Item $tempZip).Length -lt 1000) {
+        throw "Downloaded file is empty or invalid. Check Google Drive permissions."
     }
-
-    Write-Log "Download successful. Size: $finalSize bytes."
+    
+    Write-Log "Download successful. Size: $((Get-Item $tempZip).Length) bytes."
 } catch {
     Write-Log "ERROR: Download failed. $_"
     Remove-Item -Path $tempZip -Force -ErrorAction SilentlyContinue
@@ -112,14 +105,14 @@ try {
 }
 
 # -----------------------------------------------------------------------------
-# 3. Extract Archive & Copy Specific Items
+# 3. Extract ZIP and Move Specific Items to Destination
 # -----------------------------------------------------------------------------
 try {
-    Write-Log "Extracting ZIP contents to temporary directory..."
+    Write-Log "Extracting ZIP contents..."
     Expand-Archive -Path $tempZip -DestinationPath $tempExtract -Force
 
-    # Process targeted files and folders
     foreach ($itemName in $TargetItems) {
+        # Search extracted folder recursively for target items
         $foundItems = Get-ChildItem -Path $tempExtract -Filter $itemName -Recurse -ErrorAction SilentlyContinue
 
         if ($foundItems) {
@@ -134,17 +127,17 @@ try {
                 }
             }
         } else {
-            Write-Log "WARNING: Expected item '$itemName' was not found in the downloaded ZIP package."
+            Write-Log "WARNING: Expected item '$itemName' was not found in the ZIP package."
         }
     }
 
     Write-Log "Deployment completed successfully!"
+    exit 0
 } catch {
-    Write-Log "ERROR: Extraction or file deployment failed. $_"
+    Write-Log "ERROR: Extraction or deployment failed. $_"
     exit 3
 } finally {
+    # Cleanup temporary items
     Remove-Item -Path $tempZip -Force -ErrorAction SilentlyContinue
     Remove-Item -Path $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
 }
-
-exit 0
