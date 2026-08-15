@@ -18,8 +18,7 @@ function Write-Log {
 # Configuration
 # -----------------------------------------------------------------------------
 $DestinationFolder = "C:\X-Plane 12\Custom Data"
-$DefaultFileId     = "1CHt_W9PP_nhhO1YbPV8fjGno39C-V5Hh"
-$FileId            = $DefaultFileId
+$FileId            = "1hObAdYNqVTPnmggl4djK3pdskmz3o5hr"
 
 # Targeted files and directories to extract and copy
 $TargetItems = @(
@@ -56,35 +55,53 @@ $tempCookie  = Join-Path $env:TEMP ("cookie_" + [Guid]::NewGuid().ToString("N") 
 $tempExtract = Join-Path $env:TEMP ("extract_" + [Guid]::NewGuid().ToString("N"))
 
 # -----------------------------------------------------------------------------
-# 2. Download from Google Drive (Handles Confirm Tokens & Large Files)
+# 2. Download from Google Drive (API Direct Stream & Token Bypass)
 # -----------------------------------------------------------------------------
 try {
     Write-Log "Downloading ZIP package from Google Drive..."
     
+    # Download attempt via direct export URL
     $baseUrl = "https://drive.google.com/uc?export=download&id=$FileId"
     
-    # Pass 1: Get initial response and save cookies
+    # Save response and cookies using curl
     & curl.exe -s -L -c "$tempCookie" "$baseUrl" -o "$tempZip"
 
-    # Check if Google returned an HTML virus scan confirmation page
-    $fileInfo = Get-Item $tempZip
-    if ($fileInfo.Length -lt 100000) {
-        $content = [System.IO.File]::ReadAllText($tempZip)
-        if ($content -match 'confirm=([0-9A-Za-z_\-]+)' -or $content -match 'name="confirm" value="([0-9A-Za-z_\-]+)"') {
+    # Inspect downloaded payload header to see if it's an HTML virus scan page
+    $firstBytes = [System.IO.File]::ReadAllText($tempZip)
+    if ($firstBytes -match '<!DOCTYPE html' -or $firstBytes -match '<html') {
+        Write-Log "Virus scan warning page detected. Extracting confirmation token..."
+        
+        # Regex search for all current variants of Google Drive confirm tokens
+        $confirmToken = ""
+        if ($firstBytes -match 'confirm=([0-9A-Za-z_\-]+)') {
             $confirmToken = $matches[1]
-            Write-Log "Confirm token detected ($confirmToken). Executing second pass download..."
-            
+        } elseif ($firstBytes -match 'name="confirm" value="([0-9A-Za-z_\-]+)"') {
+            $confirmToken = $matches[1]
+        } elseif ($firstBytes -match 'uuid=([0-9A-Za-z_\-]+)') {
+            $confirmToken = $matches[1]
+        }
+
+        if ($confirmToken) {
+            Write-Log "Confirm token retrieved ($confirmToken). Re-requesting direct file stream..."
             $confirmUrl = "https://drive.google.com/uc?export=download&confirm=$confirmToken&id=$FileId"
             & curl.exe -s -L -b "$tempCookie" "$confirmUrl" -o "$tempZip"
+        } else {
+            # Fallback: Direct API Endpoint bypass
+            Write-Log "Attempting Direct Google Drive API bypass stream..."
+            $apiUrl = "https://www.googleapis.com/drive/v3/files/${FileId}?alt=media"
+            & curl.exe -s -L "$apiUrl" -o "$tempZip"
         }
     }
 
-    $finalSize = (Get-Item $tempZip).Length
-    Write-Log "Download stream completed. Size: $finalSize bytes."
-
-    if ($finalSize -lt 1000) {
-        throw "Downloaded file is empty or invalid ($finalSize bytes). Ensure Google Drive file has 'Anyone with link' permissions."
+    # Verify that the downloaded file is a valid ZIP archive (Magic Header: PK..)
+    $bytes = Get-Content -Path $tempZip -Encoding Byte -TotalCount 2 -ErrorAction SilentlyContinue
+    if (-not ($bytes[0] -eq 0x50 -and $bytes[1] -eq 0x4B)) {
+        throw "Downloaded payload is not a valid ZIP file. Ensure Google Drive permissions are set to 'Anyone with the link'."
     }
+
+    $finalSize = (Get-Item $tempZip).Length
+    Write-Log "Download stream finished successfully. ZIP Size: $finalSize bytes."
+
 } catch {
     Write-Log "ERROR: Google Drive download failed. Details: $_"
     Remove-Item -Path $tempZip, $tempCookie -Force -ErrorAction SilentlyContinue
