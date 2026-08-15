@@ -20,8 +20,8 @@ function Write-Log {
 # -----------------------------------------------------------------------------
 $DestinationFolder = "C:\X-Plane 12\Custom Data"
 
-# Default fallback Raw URL (Replace with your actual GitHub Raw / Release URL)
-$DownloadUrl       = "https://raw.githubusercontent.com/your-user/your-repo/main/CustomData.zip"
+# Default Raw URL
+$DownloadUrl       = "https://github.com/anthonyguthrie-create/ATPJetsLabsUpdater/raw/refs/heads/main/NAVDB.zip"
 
 # Targeted files and directories to extract and copy
 $TargetItems = @(
@@ -41,6 +41,10 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     }
 }
 
+# Clean HTML entities if passed with &amp;
+Add-Type -AssemblyName System.Web
+$DownloadUrl = [System.Web.HttpUtility]::HtmlDecode($DownloadUrl)
+
 Write-Log "Starting deployment to: $DestinationFolder"
 Write-Log "Target Download URL    : $DownloadUrl"
 
@@ -58,7 +62,7 @@ try {
 }
 
 # -----------------------------------------------------------------------------
-# 2. Direct Download from GitHub
+# 2. Direct Download from GitHub (Redirect Aware)
 # -----------------------------------------------------------------------------
 $tempZip     = Join-Path $env:TEMP ("gh_" + [Guid]::NewGuid().ToString("N") + ".zip")
 $tempExtract = Join-Path $env:TEMP ("extract_" + [Guid]::NewGuid().ToString("N"))
@@ -66,15 +70,23 @@ $tempExtract = Join-Path $env:TEMP ("extract_" + [Guid]::NewGuid().ToString("N")
 try {
     Write-Log "Downloading ZIP package from host..."
     
-    $wc = New-Object System.Net.WebClient
-    $wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-    $wc.DownloadFile($DownloadUrl, $tempZip)
+    # Invoke-WebRequest properly handles 302 redirects from GitHub to its CDN edge hosts
+    $req = [System.Net.HttpWebRequest]::Create($DownloadUrl)
+    $req.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    $req.AllowAutoRedirect = $true
+    $res = $req.GetResponse()
+    
+    $fileStream = [System.IO.File]::Create($tempZip)
+    $res.GetResponseStream().CopyTo($fileStream)
+    $fileStream.Close()
+    $res.Close()
 
-    if ((Get-Item $tempZip).Length -lt 1000) {
-        throw "Downloaded file is empty or invalid (< 1KB). Verify the URL is direct/RAW."
+    $fileSize = (Get-Item $tempZip).Length
+    if ($fileSize -lt 1000) {
+        throw "Downloaded file is empty or invalid ($fileSize bytes). Verify URL path."
     }
     
-    Write-Log "Download successful. Size: $((Get-Item $tempZip).Length) bytes."
+    Write-Log "Download successful. Size: $fileSize bytes."
 } catch {
     Write-Log "ERROR: Download failed. $_"
     Remove-Item -Path $tempZip -Force -ErrorAction SilentlyContinue
