@@ -31,19 +31,23 @@ $TargetItems = @(
     "earth_msa.dat"
 )
 
-# Parse -DownloadUrl passed via Deep Freeze Cloud arguments
-for ($i = 0; $i -lt $args.Count; $i++) {
-    if ($args[$i] -eq "-DownloadUrl" -and ($i + 1) -lt $args.Count) {
-        $DownloadUrl = $args[$i + 1]
+# Parse argument list passed via Deep Freeze Cloud
+if ($args.Count -gt 0) {
+    # Combine all arguments into a single string to handle space issues
+    $rawArgs = $args -join " "
+    
+    # Extract the HTTP/HTTPS URL from the arguments regardless of formatting
+    if ($rawArgs -match '(https?://[^\s"]+)') {
+        $DownloadUrl = $matches[1]
     }
 }
 
-# Clean HTML-encoded ampersands if passed by agent
+# Clean HTML-encoded characters if passed by agent
 Add-Type -AssemblyName System.Web
 $DownloadUrl = [System.Web.HttpUtility]::HtmlDecode($DownloadUrl)
 
 Write-Log "Starting deployment to: $DestinationFolder"
-Write-Log "Target Download URL    : $DownloadUrl"
+Write-Log "Sanitized Download URL : $DownloadUrl"
 
 # -----------------------------------------------------------------------------
 # 1. Ensure Target Directory Exists
@@ -63,12 +67,11 @@ $tempZip     = Join-Path $env:TEMP ("gh_" + [Guid]::NewGuid().ToString("N") + ".
 $tempExtract = Join-Path $env:TEMP ("extract_" + [Guid]::NewGuid().ToString("N"))
 
 # -----------------------------------------------------------------------------
-# 2. Silent Background Download (No Dialogs)
+# 2. Direct Background Download
 # -----------------------------------------------------------------------------
 try {
-    Write-Log "Downloading ZIP package from GitHub..."
+    Write-Log "Downloading ZIP package..."
     
-    # Native WebClient direct stream download
     $wc = New-Object System.Net.WebClient
     $wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
     $wc.DownloadFile($DownloadUrl, $tempZip)
