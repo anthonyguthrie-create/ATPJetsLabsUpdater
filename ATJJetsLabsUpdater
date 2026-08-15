@@ -4,9 +4,9 @@
 $ErrorActionPreference = "Stop"
 $ProgressPreference    = "SilentlyContinue"
 
-# Force TLS 1.2
+# Force TLS 1.2 / TLS 1.3
 try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
 } catch { }
 
 function Write-Log {
@@ -33,10 +33,7 @@ $TargetItems = @(
 
 # Parse argument list passed via Deep Freeze Cloud
 if ($args.Count -gt 0) {
-    # Combine all arguments into a single string to handle space issues
     $rawArgs = $args -join " "
-    
-    # Extract the HTTP/HTTPS URL from the arguments regardless of formatting
     if ($rawArgs -match '(https?://[^\s"]+)') {
         $DownloadUrl = $matches[1]
     }
@@ -67,18 +64,34 @@ $tempZip     = Join-Path $env:TEMP ("gh_" + [Guid]::NewGuid().ToString("N") + ".
 $tempExtract = Join-Path $env:TEMP ("extract_" + [Guid]::NewGuid().ToString("N"))
 
 # -----------------------------------------------------------------------------
-# 2. Direct Background Download
+# 2. Redirect-Aware Background Download (HttpClient)
 # -----------------------------------------------------------------------------
 try {
     Write-Log "Downloading ZIP package..."
     
-    $wc = New-Object System.Net.WebClient
-    $wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-    $wc.DownloadFile($DownloadUrl, $tempZip)
+    # Use System.Net.Http.HttpClient to properly follow GitHub 302 redirects
+    Add-Type -AssemblyName System.Net.Http
+    $handler = New-Object System.Net.Http.HttpClientHandler
+    $handler.AllowAutoRedirect = $true
+    
+    $client = New-Object System.Net.Http.HttpClient($handler)
+    $client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+    
+    $response = $client.GetAsync($DownloadUrl).Result
+    if (-not $response.IsSuccessStatusCode) {
+        throw "Server returned HTTP status code: $($response.StatusCode)"
+    }
+
+    $fileStream = [System.IO.File]::Create($tempZip)
+    $response.Content.CopyToAsync($fileStream).Wait()
+    $fileStream.Close()
+    $client.Dispose()
 
     $fileSize = (Get-Item $tempZip).Length
+    
+    # Verify file payload isn't 0 bytes or an empty header
     if ($fileSize -lt 1000) {
-        throw "Downloaded file is invalid ($fileSize bytes)."
+        throw "Downloaded file is invalid or corrupt ($fileSize bytes)."
     }
     
     Write-Log "Download successful. Size: $fileSize bytes."
