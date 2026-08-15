@@ -18,8 +18,9 @@ function Write-Log {
 # Configuration
 # -----------------------------------------------------------------------------
 $DestinationFolder = "C:\X-Plane 12\Custom Data"
-$DownloadUrl       = "https://github.com/anthonyguthrie-create/ATPJetsLabsUpdater/raw/refs/heads/main/NAVDB.zip"
+$DownloadUrl       = "https://raw.githubusercontent.com/anthonyguthrie-create/ATPJetsLabsUpdater/main/NAVDB.zip"
 
+# Targeted items to extract and deploy
 $TargetItems = @(
     "CIFP",
     "earth_fix.dat",
@@ -30,14 +31,14 @@ $TargetItems = @(
     "earth_msa.dat"
 )
 
-# Parse -DownloadUrl from command line
+# Parse -DownloadUrl passed via Deep Freeze Cloud arguments
 for ($i = 0; $i -lt $args.Count; $i++) {
     if ($args[$i] -eq "-DownloadUrl" -and ($i + 1) -lt $args.Count) {
         $DownloadUrl = $args[$i + 1]
     }
 }
 
-# Decode HTML entities (&amp; -> &)
+# Clean HTML-encoded ampersands if passed by agent
 Add-Type -AssemblyName System.Web
 $DownloadUrl = [System.Web.HttpUtility]::HtmlDecode($DownloadUrl)
 
@@ -45,50 +46,54 @@ Write-Log "Starting deployment to: $DestinationFolder"
 Write-Log "Target Download URL    : $DownloadUrl"
 
 # -----------------------------------------------------------------------------
-# 1. Directory Check
+# 1. Ensure Target Directory Exists
 # -----------------------------------------------------------------------------
-if (-not (Test-Path -LiteralPath $DestinationFolder)) {
-    Write-Log "Creating destination directory: $DestinationFolder"
-    New-Item -Path $DestinationFolder -ItemType Directory -Force | Out-Null
+try {
+    if (-not (Test-Path -LiteralPath $DestinationFolder)) {
+        Write-Log "Creating destination directory: $DestinationFolder"
+        New-Item -Path $DestinationFolder -ItemType Directory -Force | Out-Null
+    }
+} catch {
+    Write-Log "ERROR: Failed to create target directory. $_"
+    exit 2
 }
 
+# Setup temp paths
 $tempZip     = Join-Path $env:TEMP ("gh_" + [Guid]::NewGuid().ToString("N") + ".zip")
 $tempExtract = Join-Path $env:TEMP ("extract_" + [Guid]::NewGuid().ToString("N"))
 
 # -----------------------------------------------------------------------------
-# 2. Native Windows BITS Download
+# 2. Silent Background Download (No Dialogs)
 # -----------------------------------------------------------------------------
 try {
-    Write-Log "Downloading ZIP package..."
+    Write-Log "Downloading ZIP package from GitHub..."
     
-    # Use standard Invoke-WebRequest with explicit redirect handling
-    Invoke-WebRequest -Uri $DownloadUrl -OutFile $tempZip -MaximumRedirection 5 -UserAgent "curl/7.68.0" -UseBasicParsing
+    # Native WebClient direct stream download
+    $wc = New-Object System.Net.WebClient
+    $wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+    $wc.DownloadFile($DownloadUrl, $tempZip)
 
     $fileSize = (Get-Item $tempZip).Length
-    
-    # If smaller than 50KB, it's an HTML error page (404 / Private Repo prompt)
-    if ($fileSize -lt 50000) {
-        $content = [System.IO.File]::ReadAllText($tempZip)
-        if ($content -match "404 Not Found" -or $content -match "Sign in to GitHub") {
-            throw "GitHub returned 404 Not Found or Repository is PRIVATE. Verify file exists at branch 'main'."
-        }
+    if ($fileSize -lt 1000) {
+        throw "Downloaded file is invalid ($fileSize bytes)."
     }
-
+    
     Write-Log "Download successful. Size: $fileSize bytes."
 } catch {
-    Write-Log "ERROR: Download failed. Details: $_"
+    Write-Log "ERROR: Download failed. $_"
     Remove-Item -Path $tempZip -Force -ErrorAction SilentlyContinue
     exit 1
 }
 
 # -----------------------------------------------------------------------------
-# 3. Extract & Deploy
+# 3. Extract Archive & Copy Selected Items
 # -----------------------------------------------------------------------------
 try {
     Write-Log "Extracting ZIP contents..."
     Expand-Archive -Path $tempZip -DestinationPath $tempExtract -Force
 
     foreach ($itemName in $TargetItems) {
+        # Recurse extraction folder to find items regardless of subfolder layout
         $foundItems = Get-ChildItem -Path $tempExtract -Filter $itemName -Recurse -ErrorAction SilentlyContinue
 
         if ($foundItems) {
@@ -103,16 +108,17 @@ try {
                 }
             }
         } else {
-            Write-Log "WARNING: Item '$itemName' not found in package."
+            Write-Log "WARNING: Expected item '$itemName' was not found in the ZIP package."
         }
     }
 
     Write-Log "Deployment completed successfully!"
     exit 0
 } catch {
-    Write-Log "ERROR: Deployment failed. $_"
+    Write-Log "ERROR: Extraction or deployment failed. $_"
     exit 3
 } finally {
+    # Clean temporary files
     Remove-Item -Path $tempZip -Force -ErrorAction SilentlyContinue
     Remove-Item -Path $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
 }
