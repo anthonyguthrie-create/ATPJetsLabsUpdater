@@ -19,7 +19,9 @@ function Write-Log {
 # Configuration (Supports Command Line Arguments & Defaults)
 # -----------------------------------------------------------------------------
 $DestinationFolder = "C:\X-Plane 12\Custom Data"
-$FileId            = "1CHt_W9PP_nhhO1YbPV8fjGno39C-V5Hh" # Default target File ID
+
+# Default fallback Raw URL (Replace with your actual GitHub Raw / Release URL)
+$DownloadUrl       = "https://raw.githubusercontent.com/your-user/your-repo/main/CustomData.zip"
 
 # Targeted files and directories to extract and copy
 $TargetItems = @(
@@ -32,18 +34,15 @@ $TargetItems = @(
     "earth_msa.dat"
 )
 
-# Check if -DownloadUrl was passed in $args
+# Parse -DownloadUrl passed via Deep Freeze Cloud command line arguments
 for ($i = 0; $i -lt $args.Count; $i++) {
     if ($args[$i] -eq "-DownloadUrl" -and ($i + 1) -lt $args.Count) {
-        $passedUrl = $args[$i + 1]
-        if ($passedUrl -match 'id=([a-zA-Z0-9_-]+)') {
-            $FileId = $matches[1]
-        }
+        $DownloadUrl = $args[$i + 1]
     }
 }
 
 Write-Log "Starting deployment to: $DestinationFolder"
-Write-Log "Target File ID         : $FileId"
+Write-Log "Target Download URL    : $DownloadUrl"
 
 # -----------------------------------------------------------------------------
 # 1. Ensure Target Directory Exists
@@ -59,42 +58,20 @@ try {
 }
 
 # -----------------------------------------------------------------------------
-# 2. Download from Google Drive (Handles SYSTEM context & Confirm Tokens)
+# 2. Direct Download from GitHub
 # -----------------------------------------------------------------------------
-$tempZip     = Join-Path $env:TEMP ("gdrive_" + [Guid]::NewGuid().ToString("N") + ".zip")
+$tempZip     = Join-Path $env:TEMP ("gh_" + [Guid]::NewGuid().ToString("N") + ".zip")
 $tempExtract = Join-Path $env:TEMP ("extract_" + [Guid]::NewGuid().ToString("N"))
 
 try {
-    Write-Log "Downloading from Google Drive..."
+    Write-Log "Downloading ZIP package from host..."
     
-    $baseUrl = "https://drive.google.com/uc?export=download&id=$FileId"
     $wc = New-Object System.Net.WebClient
     $wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-    
-    # First attempt
-    $wc.DownloadFile($baseUrl, $tempZip)
-    
-    # Check if we received HTML instead of the file (Google's virus warning page)
-    $fileInfo = Get-Item $tempZip
-    if ($fileInfo.Length -lt 100000) {
-        $content = [System.IO.File]::ReadAllText($tempZip)
-        
-        # Updated regex to capture token from modern Google Drive warning pages or buttons
-        if ($content -match 'confirm=([0-9A-Za-z_\-]+)' -or $content -match 'name="confirm" value="([0-9A-Za-z_\-]+)"') {
-            $confirmToken = $matches[1]
-            Write-Log "Confirm token found ($confirmToken). Re-requesting direct file stream..."
-            $confirmUrl = "$baseUrl&confirm=$confirmToken"
-            $wc.DownloadFile($confirmUrl, $tempZip)
-        } else {
-            # Secondary fallback for large drive downloads
-            $confirmUrl = "$baseUrl&confirm=t"
-            Write-Log "Attempting forced confirmation download..."
-            $wc.DownloadFile($confirmUrl, $tempZip)
-        }
-    }
+    $wc.DownloadFile($DownloadUrl, $tempZip)
 
     if ((Get-Item $tempZip).Length -lt 1000) {
-        throw "Downloaded file is empty or invalid. Check Google Drive permissions."
+        throw "Downloaded file is empty or invalid (< 1KB). Verify the URL is direct/RAW."
     }
     
     Write-Log "Download successful. Size: $((Get-Item $tempZip).Length) bytes."
@@ -105,7 +82,7 @@ try {
 }
 
 # -----------------------------------------------------------------------------
-# 3. Extract ZIP and Move Specific Items to Destination
+# 3. Extract ZIP and Deploy Target Items
 # -----------------------------------------------------------------------------
 try {
     Write-Log "Extracting ZIP contents..."
