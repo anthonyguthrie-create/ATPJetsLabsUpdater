@@ -19,10 +19,9 @@ function Write-Log {
 # -----------------------------------------------------------------------------
 $DestinationFolder = "C:\X-Plane 12\Custom Data"
 
-# Default fallback GitHub Release URL
-$DownloadUrl       = "https://github.com/anthonyguthrie-create/ATPJetsLabsUpdater/releases/download/v1.0/NAVDB.zip"
+# Exact case-sensitive GitHub Release URL
+$DownloadUrl       = "https://github.com/anthonyguthrie-create/ATPJetsLabsUpdater/releases/download/V1.0/NavDB.zip"
 
-# Target files/folders to extract and deploy
 $TargetItems = @(
     "CIFP",
     "earth_fix.dat",
@@ -33,7 +32,7 @@ $TargetItems = @(
     "earth_msa.dat"
 )
 
-# Parse argument passed via Deep Freeze Cloud
+# Parse argument list passed via Deep Freeze Cloud
 if ($args.Count -gt 0) {
     $rawArgs = $args -join " "
     if ($rawArgs -match '(https?://[^\s"]+)') {
@@ -41,7 +40,7 @@ if ($args.Count -gt 0) {
     }
 }
 
-# Clean HTML-encoded characters
+# Clean HTML-encoded characters if passed by agent
 Add-Type -AssemblyName System.Web
 $DownloadUrl = [System.Web.HttpUtility]::HtmlDecode($DownloadUrl)
 
@@ -66,7 +65,7 @@ try {
     Write-Log "Downloading ZIP package from GitHub Release..."
     
     # -L follows GitHub CDN redirects, -s suppresses noise, -k ensures TLS stream success
-    & curl.exe -s -L -k -o "$tempZip" "$DownloadUrl"
+    & curl.exe -s -L -k -H "Accept: application/octet-stream" -o "$tempZip" "$DownloadUrl"
 
     if (-not (Test-Path $tempZip)) {
         throw "Target zip file missing from disk after download."
@@ -74,10 +73,11 @@ try {
 
     $fileSize = (Get-Item $tempZip).Length
     
-    # Validate ZIP Magic Header (PK..) to ensure we didn't receive a 404 text response
+    # Validate ZIP Magic Header (PK..)
     $bytes = Get-Content -Path $tempZip -Encoding Byte -TotalCount 2 -ErrorAction SilentlyContinue
     if (-not ($bytes[0] -eq 0x50 -and $bytes[1] -eq 0x4B)) {
-        throw "Downloaded payload is NOT a valid ZIP file ($fileSize bytes). Verify the Release URL and ensure repository is PUBLIC."
+        $rawText = [System.IO.File]::ReadAllText($tempZip)
+        throw "Server returned error response: '$rawText' ($fileSize bytes). Verify repository visibility or Release tag name."
     }
 
     Write-Log "Download completed successfully. ZIP Size: $fileSize bytes."
