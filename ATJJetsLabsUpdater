@@ -4,9 +4,9 @@
 $ErrorActionPreference = "Stop"
 $ProgressPreference    = "SilentlyContinue"
 
-# Force TLS 1.2 / TLS 1.3
+# Force TLS 1.2
 try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 } catch { }
 
 function Write-Log {
@@ -20,7 +20,6 @@ function Write-Log {
 $DestinationFolder = "C:\X-Plane 12\Custom Data"
 $DownloadUrl       = "https://raw.githubusercontent.com/anthonyguthrie-create/ATPJetsLabsUpdater/main/NAVDB.zip"
 
-# Targeted items to extract and deploy
 $TargetItems = @(
     "CIFP",
     "earth_fix.dat",
@@ -39,7 +38,7 @@ if ($args.Count -gt 0) {
     }
 }
 
-# Clean HTML-encoded characters if passed by agent
+# Clean HTML-encoded characters
 Add-Type -AssemblyName System.Web
 $DownloadUrl = [System.Web.HttpUtility]::HtmlDecode($DownloadUrl)
 
@@ -47,7 +46,7 @@ Write-Log "Starting deployment to: $DestinationFolder"
 Write-Log "Sanitized Download URL : $DownloadUrl"
 
 # -----------------------------------------------------------------------------
-# 1. Ensure Target Directory Exists
+# 1. Directory Check
 # -----------------------------------------------------------------------------
 try {
     if (-not (Test-Path -LiteralPath $DestinationFolder)) {
@@ -59,39 +58,23 @@ try {
     exit 2
 }
 
-# Setup temp paths
 $tempZip     = Join-Path $env:TEMP ("gh_" + [Guid]::NewGuid().ToString("N") + ".zip")
 $tempExtract = Join-Path $env:TEMP ("extract_" + [Guid]::NewGuid().ToString("N"))
 
 # -----------------------------------------------------------------------------
-# 2. Redirect-Aware Background Download (HttpClient)
+# 2. Robust Redirect-Aware Download
 # -----------------------------------------------------------------------------
 try {
-    Write-Log "Downloading ZIP package..."
+    Write-Log "Downloading ZIP package via Invoke-WebRequest..."
     
-    # Use System.Net.Http.HttpClient to properly follow GitHub 302 redirects
-    Add-Type -AssemblyName System.Net.Http
-    $handler = New-Object System.Net.Http.HttpClientHandler
-    $handler.AllowAutoRedirect = $true
-    
-    $client = New-Object System.Net.Http.HttpClient($handler)
-    $client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-    
-    $response = $client.GetAsync($DownloadUrl).Result
-    if (-not $response.IsSuccessStatusCode) {
-        throw "Server returned HTTP status code: $($response.StatusCode)"
-    }
-
-    $fileStream = [System.IO.File]::Create($tempZip)
-    $response.Content.CopyToAsync($fileStream).Wait()
-    $fileStream.Close()
-    $client.Dispose()
+    # Native PowerShell transfer that follows GitHub redirects under SYSTEM context
+    Invoke-WebRequest -Uri $DownloadUrl -OutFile $tempZip -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -UseBasicParsing
 
     $fileSize = (Get-Item $tempZip).Length
     
-    # Verify file payload isn't 0 bytes or an empty header
+    # Hard stop if file is empty or too small to be a ZIP
     if ($fileSize -lt 1000) {
-        throw "Downloaded file is invalid or corrupt ($fileSize bytes)."
+        throw "Downloaded file payload is invalid or 0 bytes ($fileSize bytes). Verify URL accessibility."
     }
     
     Write-Log "Download successful. Size: $fileSize bytes."
@@ -109,7 +92,6 @@ try {
     Expand-Archive -Path $tempZip -DestinationPath $tempExtract -Force
 
     foreach ($itemName in $TargetItems) {
-        # Recurse extraction folder to find items regardless of subfolder layout
         $foundItems = Get-ChildItem -Path $tempExtract -Filter $itemName -Recurse -ErrorAction SilentlyContinue
 
         if ($foundItems) {
@@ -134,7 +116,6 @@ try {
     Write-Log "ERROR: Extraction or deployment failed. $_"
     exit 3
 } finally {
-    # Clean temporary files
     Remove-Item -Path $tempZip -Force -ErrorAction SilentlyContinue
     Remove-Item -Path $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
 }
